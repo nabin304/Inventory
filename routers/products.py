@@ -1,4 +1,6 @@
-from fastapi import HTTPException, FastAPI, status, Body, APIRouter
+import re
+import sqlite3
+from fastapi import HTTPException, status, Body, APIRouter
 from pydantic import BaseModel, Field
 from database import get_db_connection
 router = APIRouter(tags=["Products"])
@@ -9,8 +11,36 @@ class ProductsDetails(BaseModel):
     price: float
     stock_quantity: int
     category: str = Field(min_length=1)
+
+class CreateProductRequest(BaseModel):
+    name: str = Field(min_length=1)
+    price: float
+    stock_quantity: int
+    category: str = Field(min_length=1)
+
+class ProductResponse(BaseModel):
+    name: str = Field(min_length=1)
+    price: float
+    stock_quantity: int
+    available:bool
+
+
+class UpdateProductResponse(BaseModel):
+    name: str
+    category: str
+
+class ProductByCategoryResponse(BaseModel):
+    name: str
+    price: float
+    stock_quantity: int
+
+class LowStockResponse(BaseModel):
+    message: str
+    total_products: int
+    products:list
+
 @router.post("/products/create", status_code=status.HTTP_201_CREATED)
-def create_products(product_name: ProductsDetails):
+def create_products(product_name: CreateProductRequest):
     if (not product_name.name.strip()
             or not product_name.category.strip()
             or product_name.price is None
@@ -42,26 +72,30 @@ def create_products(product_name: ProductsDetails):
                     product_name.stock_quantity,
                     product_name.price,
                     product_name.name))
+    product_details=cursor.fetchall()
     connection.commit()
     connection.close()
+
+
 @router.get("/products/", status_code=status.HTTP_200_OK)
-def get_all_products():
+def get_all_products()->list[ProductResponse]:
     connection = get_db_connection()
+    connection.row_factory=sqlite3.Row
     cursor = connection.cursor()
     cursor.execute("""
         select * from Products        
         """)
     all_products = cursor.fetchall()
+    cursor.close()
     connection.close()
     products_list = []
     for product in all_products:
-        products_list.append({
-            "product id": product[0],
-            "product name": product[1],
-            "product price": product[2],
-            "product stock quantity": product[3],
-            "product category": product[4]
-        })
+        products_list.append(ProductResponse(
+            name=product["name"],
+            price=product["price"],
+            stock_quantity=product["stock_quantity"],
+            available=product["stock_quantity"]>0,
+        ))
     return products_list
 @router.put("/products/{product_id}", status_code=status.HTTP_200_OK)
 def update_products(product_id: int, product_name: ProductsDetails = Body(...)):
@@ -90,13 +124,10 @@ def update_products(product_id: int, product_name: ProductsDetails = Body(...)):
     """, (product_name.name, product_name.price, product_name.stock_quantity, product_name.category, product_id))
     connection.commit()
     connection.close()
+
+
 @router.delete("/products/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_products(product_id: int):
-    if product_id < 1:
-        raise HTTPException(
-            status_code=400,
-            detail="Bad Request! Product id is invalid"
-        )
     connection = get_db_connection()
     cursor = connection.cursor()
     cursor.execute("""
@@ -107,7 +138,7 @@ def delete_products(product_id: int):
     connection.close()
 # Search products by name
 @router.get("/products/{product_name}", status_code=status.HTTP_200_OK)
-def get_product_by_name(product_name: str):
+def get_product_by_name(product_name: str)->ProductsDetails:
     if not product_name or not product_name.strip() or not re.fullmatch(r"[a-zA-Z\s-]+", product_name):
         raise HTTPException(
             status_code=400,
@@ -126,16 +157,16 @@ def get_product_by_name(product_name: str):
             status_code=404,
             detail="Not found! Product name does not exist"
         )
-    return {
-        "product id": product_found[0],
-        "product name": product_found[1],
-        "product price": product_found[2],
-        "product stock quantity": product_found[3],
-        "product category": product_found[4]
-    }
+    return ProductsDetails(
+        id=product_found[0],
+        name=product_found[1],
+        price=product_found[2],
+        stock_quantity=product_found[3],
+        category=product_found[4],
+    )
 # Filter products by category.
 @router.get("/products/{category_name}/", status_code=status.HTTP_200_OK)
-def get_product_by_category(category_name: str):
+def get_product_by_category(category_name: str)->list[ProductByCategoryResponse]:
     if not category_name or not category_name.strip() or not re.fullmatch(r"[a-zA-Z\s-]+", category_name):
         raise HTTPException(
             status_code=400,
@@ -155,16 +186,15 @@ def get_product_by_category(category_name: str):
             detail="Bad Request! Category does not exist"
         )
     connection.close()
-    category_total = []
-    for category in product_by_category:
-        category_total.append({
-            "product id": category[0],
-            "product name": category[1],
-            "product price": category[2],
-            "product stock quantity": category[3],
-            "product category": category[4]
-        })
-    return category_total
+
+    return[
+        ProductByCategoryResponse(
+            name=row[1],
+            price=row[2],
+            stock_quantity=row[3],
+        )
+        for row in product_by_category
+    ]
 # increase stock quantity
 @router.put("/products/increase-stock/", status_code=status.HTTP_200_OK)
 def increase_stock(product_id: int, quantity_to_add: int):
@@ -211,7 +241,7 @@ def decrease_stock(product_id: int, quantity_to_decrease: int):
     connection.close()
 # Find products with low stock.
 @router.get("/products/low-stock/items", status_code=status.HTTP_200_OK)
-def get_product_low_stock():
+def get_product_low_stock()->LowStockResponse:
     connection = get_db_connection()
     cursor = connection.cursor()
     cursor.execute("""
@@ -228,14 +258,12 @@ def get_product_low_stock():
     products = []
     for product in product_low_stock:
         products.append({
-            "product_id": product[0],
             "product_name": product[1],
-            "price": product[2],
             "stock_quantity": product[3],
             "category": product[4]
         })
-    return {
-        "message": "Low-stock products retrieved successfully",
-        "total_products": len(products),
-        "products": products
-    }
+    return LowStockResponse (
+        message="Low-stock products retrieved successfully",
+        total_products= len(products),
+        products= products
+    )
